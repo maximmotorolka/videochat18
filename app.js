@@ -93,12 +93,18 @@ function connectMqtt() {
       clientId: myId + '-' + Math.random().toString(16).slice(2, 8),
       clean: true, keepalive: 20, reconnectPeriod: 0, connectTimeout: 12000,
     });
-  } catch (e) { return tryNextBroker(); }
+  } catch (e) { return failBroker(); }
   client = c;
+  let connected = false;
+  // если брокер не дал connect за 16с — считаем его мёртвым и идём дальше
+  const watch = setTimeout(() => {
+    if (!connected) { console.log('[mqtt] no connect from ' + uri); try { c.end(true); } catch {} failBroker(); }
+  }, 16000);
   c.on('connect', () => {
+    connected = true; clearTimeout(watch);
     if (!room) return;
-        const t = TP + '/' + room;
-        c.subscribe([t + '/p', t + '/s', t + '/c'], { qos: 1 }, (err) => { if (err) console.warn('sub', err); });
+    const t = TP + '/' + room;
+    c.subscribe([t + '/p', t + '/s', t + '/c'], { qos: 1 }, (err) => { if (err) console.warn('sub', err); });
     pub(t + '/p', { id: myId, t: 'join', ts: Date.now() }, 1);
     joined = true;
     setStat('комната «' + room + '»');
@@ -113,11 +119,16 @@ function connectMqtt() {
     else if (topic.endsWith('/c')) onChat(m);
   });
   c.on('error', (e) => { console.warn('mqtt err', e && e.message); });
-  c.on('close', () => { console.log('[mqtt] closed from ' + uri); tryNextBroker(); });
-  c.on('offline', () => {});
-  c.on('reconnect', () => {});
+  c.on('close', () => {
+    if (!room) return;               // ушли из комнаты — не переподключаемся
+    if (!connected) return;          // не дожил до connect — это обработал watchdog/failBroker
+    console.log('[mqtt] closed from ' + uri + ', reconnecting same broker');
+    // публичный EMQX "резает" коннекты раз в ~25с — это норма: переподключаемся к тому же брокеру
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; connectMqtt(); }, 1200);
+  });
 }
-function tryNextBroker() {
+function failBroker() {
   if (reconnectTimer) return;
   brokerIdx++;
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connectMqtt(); }, 1500);
@@ -161,7 +172,9 @@ function sweepPeers() {
   for (const [id, rec] of [...peers]) {
     if (now - rec.lastSeen > PEER_TTL) dropPeer(id, 'gone');
   }
-  setStat('комната «' + room + '»: ' + (peers.size + 1) + ' чел');
+  if (!(el.stat.textContent || '').startsWith('соединение')) {
+    setStat('комната «' + room + '»: ' + (peers.size + 1) + ' чел');
+  }
 }
 // 1-на-1: зовём первого, если ещё не с кем-то в эфире
 function maybeStartCall() {
