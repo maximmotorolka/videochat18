@@ -21,8 +21,8 @@ const BROKERS = [
 ];
 const TP = 'vc18'; // префикс топиков
 const MAX_ROOM = 4;
-const PEER_TTL = 25000;     // peer "умер", если не было presence 25с
-const ALIVE_EVERY = 10000;  // шлём presence раз в 10с
+const PEER_TTL = 75000;     // peer "умер", если не было presence 75с (у брокера бывают "чёрные дыры" ~30с)
+const ALIVE_EVERY = 7000;  // шлём presence раз в 7с
 const STUN = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -108,10 +108,17 @@ function connectMqtt() {
     pub(t + '/p', { id: myId, t: 'join', ts: Date.now() }, 1);
     joined = true;
     setStat('комната «' + room + '»');
-    startAliveLoop();
-    if (!sweepTimer) sweepTimer = setInterval(sweepPeers, 5000);
-    maybeStartCall();
-  });
+        startAliveLoop();
+        if (!sweepTimer) sweepTimer = setInterval(sweepPeers, 5000);
+        maybeStartCall();
+        // после переподключения брокера: если offer создан, но ответ не пришёл — повторяем offer
+        if (activePeer) {
+          const r2 = peers.get(activePeer);
+          if (r2 && r2.pc && !r2.pc.closed && r2.pc.localDescription && !r2.pc.remoteDescription) {
+            pubSdp(activePeer, r2.pc.localDescription);
+          }
+        }
+      });
   c.on('message', (topic, payload) => {
     let m; try { m = JSON.parse(payload.toString()); } catch { return; }
     if (topic.endsWith('/p')) onPresence(m);
@@ -222,49 +229,78 @@ async function startCallWith(peer, initiator) {
       if (rec.pc) { try { rec.pc.close(); } catch {} }
       rec.pc = makePC(peer, (e) => { if (peer === activePeer) el.remote.srcObject = e.streams[0] || e.track; });
     }
-    if (initiator && rec.pc && !rec.pc.localDescription) {
-      try {
-        const off = await rec.pc.createOffer();
-        await rec.pc.setLocalDescription(off);
-        pub(TP + '/' + room + '/s', { from: myId, to: peer, data: JSON.stringify({ sdp: rec.pc.localDescription }) }, 1);
-      } catch (e) { console.warn('offer', e); }
+        if (initiator && rec.pc && !rec.pc.localDescription) {
+          try {
+            const off = await rec.pc.createOffer();
+            await rec.pc.setLocalDescription(off);
+            pubSdp(peer, rec.pc.localDescription);
+          } catch (e) { console.warn('offer', e); }
+        }
+      }
+    // Повторная отправка SDP: публичный брокер "рвёт" коннекты на ~20-30с,
+    // поэтому каждое SDP-событие повторяем 4 раза (0/2.5/6/12с).
+    function pubSdp(peer, sdp) {
+      const msg = { from: myId, to: peer, data: JSON.stringify({ sdp }) };
+      const send = () => pub(TP + '/' + room + '/s', msg, 1);
+      send();
+      setTimeout(send, 2500);
+      setTimeout(send, 6000);
+      setTimeout(send, 12000);
     }
-  }
-function onSignalMsg(m) {
-  if (!m || m.to !== myId || !m.from) return;
-  console.log('[VC] sig to-me from=' + m.from.slice(0, 6));
-  const from = m.from;
-  let s; try { s = JSON.parse(m.data); } catch { return; }
-  let rec = peers.get(from);
-  if (!rec) return; // не из комнаты
-    const peer = from;
-    Promise.resolve((async () => {
-      if (!rec.pc || rec.pc.closed) {
-        try { await ensureMedia(); } catch {}
-        rec.pc = makePC(peer, (e) => { if (peer === activePeer) el.remote.srcObject = e.streams[0] || e.track; });
-      }
-      const pc = rec.pc;
-      if (s.sdp) {
-      if (peer !== activePeer) {
-        // переключаем эфир на этого собеседника
-        if (activePeer && peers.get(activePeer) && peers.get(activePeer).pc) { try { peers.get(activePeer).pc.close(); peers.get(activePeer).pc = null; } catch {} }
-        activePeer = peer;
-        showCall('Собеседник: ' + peer.slice(0, 6));
-      }
-      await pc.setRemoteDescription(new RTCSessionDescription(s.sdp));
-      for (const cand of rec.cands || []) { try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch {} }
-      rec.cands = [];
-      if (s.sdp.type === 'offer') {
-        const an = await pc.createAnswer();
-        await pc.setLocalDescription(an);
-        pub(TP + '/' + room + '/s', { from: myId, to: peer, data: JSON.stringify({ sdp: pc.localDescription }) }, 1);
-      }
-    } else if (s.cand) {
-      if (!pc.remoteDescription) (rec.cands = rec.cands || []).push(s.cand);
-      else { try { await pc.addIceCandidate(new RTCIceCandidate(s.cand)); } catch {} }
+    function onSignalMsg(m) {
+      if (!m || m.to !== myId || !m.from) return;
+      const from = m.from;
+      let s; try { s = JSON.parse(m.data); } catch { return; }
+      let rec = peers.get(from);
+      if (!rec) return; // не из комнаты
+      const peer = from;
+      Promise.resolve((async () => {
+        if (!rec.pc || rec.pc.closed) {
+          try { await ensureMedia(); } catch {}
+          rec.pc = makePC(peer, (e) => { if (peer === activePeer) el.remote.srcObject = e.streams[0] || e.track; });
+        }
+        let pc = rec.pc;
+        if (s.sdp) {
+          if (peer !== activePeer) {
+            // переключаем эфир на этого собеседника
+            if (activePeer && peers.get(activePeer) && peers.get(activePeer).pc) { try { peers.get(activePeer).pc.close(); } catch {} }
+            activePeer = peer;
+            showCall('Собеседник: ' + peer.slice(0, 6));
+          }
+          if (s.sdp.type === 'offer') {
+            // уже соединены и получили дубликат offer — просто подтверждаем ответом
+            if (pc.remoteDescription && pc.remoteDescription.type === 'offer' &&
+                pc.localDescription && pc.localDescription.type === 'answer' &&
+                (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed')) {
+              pubSdp(peer, pc.localDescription);
+              return;
+            }
+            // negotiation есть, но соединения нет — начинаем заново (свежие кандидаты)
+            if (pc.remoteDescription || pc.localDescription) {
+              try { pc.close(); } catch {}
+              try { await ensureMedia(); } catch {}
+              rec.pc = makePC(peer, (e) => { if (peer === activePeer) el.remote.srcObject = e.streams[0] || e.track; });
+              pc = rec.pc;
+              rec.cands = [];
+            }
+            await pc.setRemoteDescription(new RTCSessionDescription(s.sdp));
+            for (const cand of rec.cands || []) { try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch {} }
+            rec.cands = [];
+            const an = await pc.createAnswer();
+            await pc.setLocalDescription(an);
+            pubSdp(peer, pc.localDescription);
+          } else if (s.sdp.type === 'answer') {
+            if (pc.remoteDescription && pc.remoteDescription.type === 'answer') return; // дубликат
+            await pc.setRemoteDescription(new RTCSessionDescription(s.sdp));
+            for (const cand of rec.cands || []) { try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch {} }
+            rec.cands = [];
+          }
+        } else if (s.cand) {
+          if (!pc.remoteDescription) (rec.cands = rec.cands || []).push(s.cand);
+          else { try { await pc.addIceCandidate(new RTCIceCandidate(s.cand)); } catch {} }
+        }
+      })()).catch((e) => console.warn('signal err', e));
     }
-  })()).catch((e) => console.warn('signal err', e));
-}
 
 // ---------- чат ----------
 function onChat(m) {
