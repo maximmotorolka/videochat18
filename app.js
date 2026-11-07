@@ -106,13 +106,19 @@ function connectMqtt() {
       const t = TP + '/' + room;
       c.subscribe([t + '/p', t + '/s', t + '/c', t + '/sdp/+'], { qos: 1 }, (err) => { if (err) console.warn('sub', err); });
       pub(t + '/p', { id: myId, t: 'join', ts: Date.now() }, 1);
-      // повторно опубликовать свой retained-SDP (если предыдущий publish был в "чёрной дыре")
-      if (activePeer) {
-        const r2 = peers.get(activePeer);
-        if (r2 && r2.pc && r2.pc.localDescription) {
-          pubSdpRetain({ from: myId, to: activePeer, data: JSON.stringify({ sdp: r2.pc.localDescription }) });
-        }
-      }
+          // повторно опубликовать свой retained-SDP и все собранные ICE-кандидаты
+          // (в "чёрных дырах" брокера мгновенные сообщения теряются)
+          if (activePeer) {
+            const r2 = peers.get(activePeer);
+            if (r2 && r2.pc && !r2.pc.closed) {
+              if (r2.pc.localDescription) {
+                pubSdpRetain({ from: myId, to: activePeer, data: JSON.stringify({ sdp: r2.pc.localDescription }) });
+              }
+              for (const cand of (r2.pc.__sentCands || [])) {
+                pub(TP + '/' + room + '/s', { from: myId, to: activePeer, data: JSON.stringify({ cand }) });
+              }
+            }
+          }
       joined = true;
       setStat('комната «' + room + '»');
       startAliveLoop();
@@ -222,10 +228,14 @@ async function ensureMedia() {
 function makePC(peer, onTrack) {
   const c = new RTCPeerConnection(pcConfig);
   c.__peer = peer;
+  c.__sentCands = [];
   if (stream) for (const t of stream.getTracks()) c.addTrack(t, stream);
   c.ontrack = (e) => { onTrack && onTrack(e); };
   c.onicecandidate = (e) => {
-    if (e.candidate) pub(TP + '/' + room + '/s', { from: myId, to: peer, data: JSON.stringify({ cand: e.candidate }) });
+    if (e.candidate) {
+      c.__sentCands.push(e.candidate);
+      pub(TP + '/' + room + '/s', { from: myId, to: peer, data: JSON.stringify({ cand: e.candidate }) });
+    }
   };
   c.onconnectionstatechange = () => { setStat('соединение: ' + c.connectionState); };
   return c;
