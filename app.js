@@ -32,7 +32,7 @@ const STUN = [
 const pcConfig = { iceServers: STUN, iceCandidatePoolSize: 4 };
 
 const myId = Math.random().toString(36).slice(2, 10);
-let mqtt = null, brokerIdx = 0, reconnectTimer = null, aliveTimer = null, sweepTimer = null;
+let client = null, brokerIdx = 0, reconnectTimer = null, aliveTimer = null, sweepTimer = null;
 let room = null;
 const peers = new Map(); // id -> {lastSeen, pc, cands:[]}
 let activePeer = null, stream = null, joined = false;
@@ -92,7 +92,7 @@ function connectMqtt() {
       clean: true, keepalive: 20, reconnectPeriod: 0, connectTimeout: 12000,
     });
   } catch (e) { return tryNextBroker(); }
-  mqtt = c;
+  client = c;
   c.on('connect', () => {
     if (!room) return;
     const t = TP + '/' + room;
@@ -120,7 +120,7 @@ function tryNextBroker() {
   brokerIdx++;
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connectMqtt(); }, 1500);
 }
-const pub = (topic, obj, qos) => { if (mqtt && mqtt.connected) try { mqtt.publish(topic, JSON.stringify(obj), { qos: qos || 0 }); } catch {} };
+const pub = (topic, obj, qos) => { if (client && client.connected) { try { client.publish(topic, JSON.stringify(obj), { qos: qos || 0 }); } catch {} } };
 
 function startAliveLoop() {
   if (aliveTimer) clearInterval(aliveTimer);
@@ -290,8 +290,8 @@ function enterRoom(code, created) {
 }
 function leaveRoom() {
   if (room) pub(TP + '/' + room + '/p', { id: myId, t: 'leave' }, 1);
-  try { if (mqtt) mqtt.end(true); } catch {}
-  mqtt = null;
+  try { if (client) client.end(true); } catch {}
+  client = null;
   if (aliveTimer) { clearInterval(aliveTimer); aliveTimer = null; }
   if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
   for (const rec of peers.values()) { if (rec.pc) { try { rec.pc.close(); } catch {} } }
