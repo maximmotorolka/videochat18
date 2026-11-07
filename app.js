@@ -16,8 +16,8 @@ const el = {
 };
 
 const BROKERS = [
-  'wss://broker.hivemq.com:8884/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
 ];
 const TP = 'vc18'; // префикс топиков
 const MAX_ROOM = 4;
