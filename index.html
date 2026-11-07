@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="robots" content="noindex, nofollow"/>
+<meta name="rating" content="18+"/>
+<title>ВидеоЧат 18+</title>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<div id="agegate" class="gate hidden">
+  <div class="gate-box">
+    <div class="age-badge">18+</div>
+    <h1>ВидеоЧат</h1>
+    <p>Этот сайт содержит контент для лиц старше 18 лет.<br/>Продолжая, вы подтверждаете, что вам есть 18 лет, и принимаете правила сообщества.</p>
+    <label class="chk"><input type="checkbox" id="agechk"/> Мне есть 18 лет</label>
+    <div class="gate-row">
+      <button id="agebtn" class="btn primary" disabled>Войти</button>
+      <a class="btn ghost" href="about:blank" onclick="window.close()">Мне нет 18 — выйти</a>
+    </div>
+    <p class="small">Нажимая «Войти», вы соглашаетесь с правилами: уважение к собеседникам, запрет оскорблений и контента без согласия. Снимайте видео только с согласия собеседника.</p>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <div class="logo">ВидеоЧат <span class="age-badge sm">18+</span></div>
+    <div id="stat" class="stat"></div>
+  </header>
+
+  <main id="home" class="view">
+    <section class="card">
+      <h2>Создать комнату</h2>
+      <p class="muted">Создайте комнату и отправьте ссылку собеседнику. Видео — 1-на-1, в комнате до 4 человек.</p>
+      <button id="createbtn" class="btn primary big">🎥 Создать комнату</button>
+      <div id="roomlink-box" class="hidden">
+        <p class="muted">Ссылка на комнату — отправьте её собеседнику:</p>
+        <div class="row">
+          <input id="roomlink" readonly class="muted"/>
+          <button id="copybtn" class="btn">Копировать</button>
+        </div>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Войти в комнату</h2>
+      <div class="row">
+        <input id="joinname" maxlength="24" placeholder="код комнаты" autocomplete="off"/>
+        <button id="joinbtn" class="btn">Войти</button>
+      </div>
+    </section>
+  </main>
+
+  <main id="call" class="view hidden">
+    <div class="call-wrap">
+      <div id="stage">
+        <video id="remote" autoplay playsinline></video>
+        <video id="local" muted autoplay playsinline class="local"></video>
+        <div id="callstatus" class="callstatus"></div>
+      </div>
+      <div class="controls">
+        <button id="micbtn" class="btn ctl" title="Микрофон">🎙</button>
+        <button id="cambtn" class="btn ctl" title="Камера">📷</button>
+        <button id="sharebtn" class="btn ghost ctl" title="Скопировать ссылку на комнату">🔗</button>
+        <button id="leavebtn" class="btn danger ctl" title="Покинуть комнату">✕</button>
+      </div>
+      <div id="chatbox" class="chatbox"></div>
+      <form id="chatform" class="chatrow">
+        <input id="chatinput" maxlength="500" placeholder="сообщение… (Enter)" autocomplete="off"/>
+        <button class="btn" type="submit">➤</button>
+      </form>
+    </div>
+  </main>
+</div>
+<script src="https://unpkg.com/mqtt@5.3.5/dist/mqtt.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
