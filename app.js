@@ -100,31 +100,43 @@ function connectMqtt() {
   const watch = setTimeout(() => {
     if (!connected) { console.log('[mqtt] no connect from ' + uri); try { c.end(true); } catch {} failBroker(); }
   }, 16000);
-  c.on('connect', () => {
-    connected = true; clearTimeout(watch);
-    if (!room) return;
-    const t = TP + '/' + room;
-    c.subscribe([t + '/p', t + '/s', t + '/c'], { qos: 1 }, (err) => { if (err) console.warn('sub', err); });
-    pub(t + '/p', { id: myId, t: 'join', ts: Date.now() }, 1);
-    joined = true;
-    setStat('комната «' + room + '»');
-        startAliveLoop();
-        if (!sweepTimer) sweepTimer = setInterval(sweepPeers, 5000);
-        maybeStartCall();
-        // после переподключения брокера: если offer создан, но ответ не пришёл — повторяем offer
-        if (activePeer) {
-          const r2 = peers.get(activePeer);
-          if (r2 && r2.pc && !r2.pc.closed && r2.pc.localDescription && !r2.pc.remoteDescription) {
-            pubSdp(activePeer, r2.pc.localDescription);
-          }
+    c.on('connect', () => {
+      connected = true; clearTimeout(watch);
+      if (!room) return;
+      const t = TP + '/' + room;
+      c.subscribe([t + '/p', t + '/s', t + '/c', t + '/sdp/+'], { qos: 1 }, (err) => { if (err) console.warn('sub', err); });
+      pub(t + '/p', { id: myId, t: 'join', ts: Date.now() }, 1);
+      // повторно опубликовать свой retained-SDP (если предыдущий publish был в "чёрной дыре")
+      if (activePeer) {
+        const r2 = peers.get(activePeer);
+        if (r2 && r2.pc && r2.pc.localDescription) {
+          pubSdpRetain({ from: myId, to: activePeer, data: JSON.stringify({ sdp: r2.pc.localDescription }) });
         }
-      });
-  c.on('message', (topic, payload) => {
-    let m; try { m = JSON.parse(payload.toString()); } catch { return; }
-    if (topic.endsWith('/p')) onPresence(m);
-    else if (topic.endsWith('/s')) onSignalMsg(m);
-    else if (topic.endsWith('/c')) onChat(m);
-  });
+      }
+      joined = true;
+      setStat('комната «' + room + '»');
+      startAliveLoop();
+      if (!sweepTimer) sweepTimer = setInterval(sweepPeers, 5000);
+      maybeStartCall();
+    });
+    c.on('message', (topic, payload) => {
+      const text = payload.toString();
+      // retained-SDP: тема vc18/<room>/sdp/<peerId>
+          const mSdp = topic.match(/\/sdp\/([a-z0-9]+)$/);
+          if (mSdp && mSdp[1] !== myId) {
+            if (!text) return;
+            let m; try { m = JSON.parse(text); } catch { return; }
+            if (!m || !m.data) return;
+            // SDP без presence (retained с прошлого визита) — всё равно регистрируем участника
+            if (!peers.has(mSdp[1])) peers.set(mSdp[1], { lastSeen: Date.now(), pc: null, cands: [] });
+            onSignalMsg({ from: mSdp[1], to: myId, data: m.data });
+            return;
+          }
+      let m2; try { m2 = JSON.parse(text); } catch { return; }
+      if (topic.endsWith('/p')) onPresence(m2);
+      else if (topic.endsWith('/s')) onSignalMsg(m2);
+      else if (topic.endsWith('/c')) onChat(m2);
+    });
   c.on('error', (e) => { console.warn('mqtt err', e && e.message); });
   c.on('close', () => {
     if (!room) return;               // ушли из комнаты — не переподключаемся
@@ -141,6 +153,14 @@ function failBroker() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connectMqtt(); }, 1500);
 }
 const pub = (topic, obj, qos) => { if (client && client.connected) { try { client.publish(topic, JSON.stringify(obj), { qos: qos || 0 }); } catch {} } };
+// retained-SDP: последняя SDP каждого участника хранится на брокере,
+// поэтому ответ/оффер НЕ теряются при обрывах коннекта (подписавшийся получает её сразу)
+const pubSdpRetain = (obj) => {
+  if (client && client.connected && room) { try { client.publish(TP + '/' + room + '/sdp/' + myId, JSON.stringify(obj), { qos: 1, retain: true }); } catch {} }
+};
+const clearSdpRetain = () => {
+  if (client && client.connected && room) { try { client.publish(TP + '/' + room + '/sdp/' + myId, '', { qos: 0, retain: true }); } catch {} }
+};
 
 function startAliveLoop() {
   if (aliveTimer) clearInterval(aliveTimer);
@@ -237,15 +257,11 @@ async function startCallWith(peer, initiator) {
           } catch (e) { console.warn('offer', e); }
         }
       }
-    // Повторная отправка SDP: публичный брокер "рвёт" коннекты на ~20-30с,
-    // поэтому каждое SDP-событие повторяем 4 раза (0/2.5/6/12с).
+    // SDP дублируем: и в «мгновенный» топик, и в retained (защита от «чёрных дыр» брокера)
     function pubSdp(peer, sdp) {
       const msg = { from: myId, to: peer, data: JSON.stringify({ sdp }) };
-      const send = () => pub(TP + '/' + room + '/s', msg, 1);
-      send();
-      setTimeout(send, 2500);
-      setTimeout(send, 6000);
-      setTimeout(send, 12000);
+      pub(TP + '/' + room + '/s', msg, 1);
+      pubSdpRetain(msg);
     }
     function onSignalMsg(m) {
       if (!m || m.to !== myId || !m.from) return;
@@ -351,7 +367,10 @@ function enterRoom(code, created) {
   if (created) sysMsg('Комната создана. Пришлите ссылку собеседнику.');
 }
 function leaveRoom() {
-  if (room) pub(TP + '/' + room + '/p', { id: myId, t: 'leave' }, 1);
+  if (room) {
+    pub(TP + '/' + room + '/p', { id: myId, t: 'leave' }, 1);
+    clearSdpRetain();
+  }
   try { if (client) client.end(true); } catch {}
   client = null;
   if (aliveTimer) { clearInterval(aliveTimer); aliveTimer = null; }
