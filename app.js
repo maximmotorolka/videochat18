@@ -143,6 +143,7 @@ function startAliveLoop() {
 // ---------- presence ----------
 function onPresence(m) {
   if (!m || !m.id || m.id === myId) return;
+  console.log('[VC] presence from=' + m.id.slice(0, 6) + ' t=' + m.t);
   if (m.t === 'leave') { dropPeer(m.id, 'left'); return; }
   if (m.t !== 'join' && m.t !== 'alive') return;
   const isNew = !peers.has(m.id);
@@ -156,6 +157,7 @@ function onPresence(m) {
   maybeStartCall();
 }
 function dropPeer(id, why) {
+  console.log('[VC] dropPeer ' + id.slice(0, 6) + ' reason=' + why);
   const rec = peers.get(id);
   if (!rec) return;
   if (rec.pc) { try { rec.pc.close(); } catch {} }
@@ -202,6 +204,7 @@ function makePC(peer, onTrack) {
   return c;
 }
 async function startCallWith(peer, initiator) {
+  console.log('[VC] startCall ' + peer.slice(0, 6) + ' init=' + initiator + ' peers=' + peers.size + ' active=' + (activePeer || 'null'));
   if (peers.size >= MAX_ROOM) return;
   activePeer = peer;
   showCall('Подключение к ' + peer.slice(0, 6) + '…');
@@ -210,30 +213,38 @@ async function startCallWith(peer, initiator) {
     sysMsg('Нет доступа к камере/микрофону: ' + e.message);
     return;
   }
-  const rec = peers.get(peer) || { lastSeen: Date.now(), pc: null, cands: [] };
-  peers.set(peer, rec);
-  rec.pc = makePC(peer, (e) => { if (peer === activePeer) el.remote.srcObject = e.streams[0] || e.track; });
-  if (initiator) {
-    try {
-      const off = await rec.pc.createOffer();
-      await rec.pc.setLocalDescription(off);
-      pub(TP + '/' + room + '/s', { from: myId, to: peer, data: JSON.stringify({ sdp: rec.pc.localDescription }) }, 1);
-    } catch (e) { console.warn('offer', e); }
+    const rec = peers.get(peer) || { lastSeen: Date.now(), pc: null, cands: [] };
+    peers.set(peer, rec);
+    // не пересоздаём живой PC (гонка: offer мог уже обработаться на старом PC)
+    if (rec.pc && !rec.pc.closed && (rec.pc.localDescription || rec.pc.remoteDescription)) {
+      // эфир уже идёт — не трогаем
+    } else {
+      if (rec.pc) { try { rec.pc.close(); } catch {} }
+      rec.pc = makePC(peer, (e) => { if (peer === activePeer) el.remote.srcObject = e.streams[0] || e.track; });
+    }
+    if (initiator && rec.pc && !rec.pc.localDescription) {
+      try {
+        const off = await rec.pc.createOffer();
+        await rec.pc.setLocalDescription(off);
+        pub(TP + '/' + room + '/s', { from: myId, to: peer, data: JSON.stringify({ sdp: rec.pc.localDescription }) }, 1);
+      } catch (e) { console.warn('offer', e); }
+    }
   }
-}
 function onSignalMsg(m) {
   if (!m || m.to !== myId || !m.from) return;
+  console.log('[VC] sig to-me from=' + m.from.slice(0, 6));
   const from = m.from;
   let s; try { s = JSON.parse(m.data); } catch { return; }
   let rec = peers.get(from);
   if (!rec) return; // не из комнаты
-  const peer = from;
-  if (!rec.pc) {
-    rec.pc = makePC(peer, (e) => { if (peer === activePeer) el.remote.srcObject = e.streams[0] || e.track; });
-  }
-  const pc = rec.pc;
-  Promise.resolve((async () => {
-    if (s.sdp) {
+    const peer = from;
+    Promise.resolve((async () => {
+      if (!rec.pc || rec.pc.closed) {
+        try { await ensureMedia(); } catch {}
+        rec.pc = makePC(peer, (e) => { if (peer === activePeer) el.remote.srcObject = e.streams[0] || e.track; });
+      }
+      const pc = rec.pc;
+      if (s.sdp) {
       if (peer !== activePeer) {
         // переключаем эфир на этого собеседника
         if (activePeer && peers.get(activePeer) && peers.get(activePeer).pc) { try { peers.get(activePeer).pc.close(); peers.get(activePeer).pc = null; } catch {} }
