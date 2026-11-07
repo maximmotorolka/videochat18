@@ -33,6 +33,7 @@ const pcConfig = { iceServers: STUN, iceCandidatePoolSize: 4 };
 
 const myId = Math.random().toString(36).slice(2, 10);
 let client = null, brokerIdx = 0, reconnectTimer = null, aliveTimer = null, sweepTimer = null;
+let currentBroker = null;
 let room = null;
 const peers = new Map(); // id -> {lastSeen, pc, cands:[]}
 let activePeer = null, stream = null, joined = false;
@@ -84,6 +85,7 @@ else {
 // ---------- MQTT ----------
 function connectMqtt() {
   const uri = BROKERS[brokerIdx % BROKERS.length];
+  currentBroker = uri;
   setStat('подключение… (' + uri.replace('wss://', '').split('/')[0] + ')');
   let c;
   try {
@@ -95,8 +97,8 @@ function connectMqtt() {
   client = c;
   c.on('connect', () => {
     if (!room) return;
-    const t = TP + '/' + room;
-    c.subscribe([t + '/p', t + '/s', t + '/c'].join(' '), { qos: 1 }, (err) => { if (err) console.warn('sub', err); });
+        const t = TP + '/' + room;
+        c.subscribe([t + '/p', t + '/s', t + '/c'], { qos: 1 }, (err) => { if (err) console.warn('sub', err); });
     pub(t + '/p', { id: myId, t: 'join', ts: Date.now() }, 1);
     joined = true;
     setStat('комната «' + room + '»');
@@ -111,7 +113,7 @@ function connectMqtt() {
     else if (topic.endsWith('/c')) onChat(m);
   });
   c.on('error', (e) => { console.warn('mqtt err', e && e.message); });
-  c.on('close', () => { tryNextBroker(); });
+  c.on('close', () => { console.log('[mqtt] closed from ' + uri); tryNextBroker(); });
   c.on('offline', () => {});
   c.on('reconnect', () => {});
 }
